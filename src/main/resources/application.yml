@@ -1,0 +1,34 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: cms-bill
+  # Java 21 虚拟线程：提升事件推送与查询的并发吞吐
+  threads:
+    virtual:
+      enabled: true
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      # password: 按需填写
+      timeout: 3s
+
+app:
+  stats:
+    # 坐席日统计 key 的保留天数（每次写入自动续期）
+    retention-days: 30
+  dedup:
+    # 事件幂等去重 key 的保留时长（秒）
+    ttl-seconds: 86400
+  state:
+    # 坐席状态 hash 的保留时长（秒），每次事件自动续期，防止僵尸状态
+    ttl-seconds: 604800
+  ingest:
+    # 允许事件时间超前服务器时间的最大偏差（秒），超出则拒绝（时钟偏差防护）
+    max-future-skew-seconds: 300
+
+logging:
+  level:
+    com.cms.bill: INFO
