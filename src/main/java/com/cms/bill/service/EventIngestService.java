@@ -1,5 +1,7 @@
 package com.cms.bill.service;
 
+import com.cms.bill.audit.EventAuditDisposition;
+import com.cms.bill.audit.EventAuditService;
 import com.cms.bill.common.BizException;
 import com.cms.bill.event.AgentEventRequest;
 import com.cms.bill.event.AgentEventType;
@@ -27,8 +29,9 @@ import java.util.List;
  * <p>可靠性设计（参考 Avaya CMS/ECHI）：</p>
  * <ul>
  *   <li>事件ID幂等去重：重复事件直接确认，不产生任何统计变更</li>
- *   <li>事件序列号防护：携带 seq 时必须严格递增，过旧事件返回 200 ignored
- *       （去重占位保留，对应 ECHI 重传重复识别）</li>
+ *   <li>事件序列号防护：携带 seq 时按 32 位回绕语义校验单调递增（对应 ECHI SEQUENCE_NUMBER
+ *       4 字节序号计满回绕归零），回绕后继续接受并累计 seqWrapCount；重复/过旧事件返回
+ *       200 ignored（去重占位保留，对应 ECHI 重传重复识别）</li>
  *   <li>时钟偏差防护：事件时间超前服务器时间超过阈值返回 400
  *       （清除去重占位，允许调用方校对后重推）</li>
  *   <li>乱序事件：不倒退状态机，仅记录观测字段并标记 outOfOrder</li>
@@ -47,6 +50,7 @@ public class EventIngestService {
             new DefaultRedisScript<>(AgentStateLua.INGEST, List.class);
 
     private final StringRedisTemplate redis;
+    private final EventAuditService auditService;
     private final long statsTtlSeconds;
     private final long dedupTtlSeconds;
     private final long stateTtlSeconds;
@@ -54,11 +58,13 @@ public class EventIngestService {
     private final long activeSetTtlSeconds = 2L * 24 * 3600;
 
     public EventIngestService(StringRedisTemplate redis,
+                              EventAuditService auditService,
                               @Value("${app.stats.retention-days:30}") long retentionDays,
                               @Value("${app.dedup.ttl-seconds:86400}") long dedupTtlSeconds,
                               @Value("${app.state.ttl-seconds:604800}") long stateTtlSeconds,
                               @Value("${app.ingest.max-future-skew-seconds:300}") long maxFutureSkewSeconds) {
         this.redis = redis;
+        this.auditService = auditService;
         this.statsTtlSeconds = retentionDays * 24 * 3600;
         this.dedupTtlSeconds = dedupTtlSeconds;
         this.stateTtlSeconds = stateTtlSeconds;
@@ -66,11 +72,27 @@ public class EventIngestService {
     }
 
     /**
-     * 处理单条坐席事件。
+     * 处理单条坐席事件（含审计旁路：处理前先落 RECEIVED 行，处理后回填处置结果；
+     * 审计读写失败仅记日志，不阻断主流程）。
      *
      * @throws BizException 400=事件类型无法识别 / 事件时间超前过多；409=并发冲突重试耗尽
      */
     public IngestResult ingest(AgentEventRequest req) {
+        long auditId = auditService.recordReceived(req);
+        try {
+            IngestResult result = doIngest(req);
+            EventAuditDisposition disposition = result.duplicate() ? EventAuditDisposition.DUPLICATE
+                    : result.ignored() ? EventAuditDisposition.IGNORED
+                    : EventAuditDisposition.ACCEPTED;
+            auditService.recordOutcome(auditId, disposition, result.ignoredReason(), result);
+            return result;
+        } catch (BizException e) {
+            auditService.recordOutcome(auditId, EventAuditDisposition.REJECTED, e.getMessage(), null);
+            throw e;
+        }
+    }
+
+    private IngestResult doIngest(AgentEventRequest req) {
         AgentEventType type = AgentEventType.parse(req.eventType());
         if (type == null) {
             throw new BizException(400,
@@ -150,7 +172,7 @@ public class EventIngestService {
             if (code == 3) {
                 // 序列号过旧（参考 Avaya ECHI）：事件被忽略但确认已收到，去重占位保留
                 String prevState = (String) r.get(1);
-                log.warn("坐席[{}] 事件[{}] 序列号 {} 过旧（已处理至更高），忽略该事件",
+                log.warn("坐席[{}] 事件[{}] 序列号 {} 过旧或回绕距离非法（重复/序号重置），忽略该事件",
                         agentId, eventId, seq);
                 return new IngestResult(agentId, eventId, type.name(), type.getLabel(), req.eventTime(),
                         false, true, "SEQ_TOO_OLD", false, true,

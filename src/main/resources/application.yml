@@ -14,6 +14,14 @@ spring:
       port: 6379
       # password: 按需填写
       timeout: 3s
+  # 事件审计内嵌 H2 文件库（零中间件依赖；换 MySQL/PostgreSQL 仅需改此处连接配置）
+  datasource:
+    url: jdbc:h2:file:./data/cmsbill
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      # 每次启动执行 schema.sql（建表语句均 IF NOT EXISTS，可重复执行）
+      mode: always
 
 app:
   stats:
@@ -28,6 +36,11 @@ app:
   ingest:
     # 允许事件时间超前服务器时间的最大偏差（秒），超出则拒绝（时钟偏差防护）
     max-future-skew-seconds: 300
+  audit:
+    # 事件审计记录保留天数（对齐 CMS 区间数据保留期），超期定时清理
+    retention-days: 31
+    # 审计清理定时任务（默认每天 03:30）
+    purge-cron: "0 30 3 * * *"
 
 logging:
   level:

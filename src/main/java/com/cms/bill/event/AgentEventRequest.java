@@ -15,8 +15,8 @@ import java.util.Map;
  * @param eventId   事件唯一ID（可选；提供后按坐席+事件ID做幂等去重）
  * @param eventType 事件类型（支持枚举名或中文别名，如 CALL_START / 通话开始）
  * @param eventTime 事件发生时间（支持 epoch 毫秒 / ISO-8601 / yyyy-MM-dd HH:mm:ss）
- * @param seq       事件序列号（可选；同一坐席必须严格递增，过旧事件被忽略，
- *                  参考 Avaya ECHI SEQUENCE_NUMBER 防重放机制）
+ * @param seq       事件序列号（可选；32 位序号语义，计满回绕归零，按回绕感知距离校验
+ *                  单调递增，重复/过旧事件被忽略，参考 Avaya ECHI SEQUENCE_NUMBER 防重放机制）
  * @param callId    通话唯一标识（通话开始/结束时可选提供）
  * @param ext       透传扩展字段（不参与统计，仅记录）
  */

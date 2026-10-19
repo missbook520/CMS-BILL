@@ -12,3 +12,6 @@ target/
 
 logs/
 *.log
+
+# H2 审计库数据目录
+data/

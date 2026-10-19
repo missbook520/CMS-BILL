@@ -8,7 +8,8 @@ package com.cms.bill.redis;
  * <p>可靠性设计（参考 Avaya CMS/ECHI 的做法）：</p>
  * <ul>
  *   <li>事件幂等去重：SET NX 占位，重复事件直接确认（对应 ECHI 重传识别）</li>
- *   <li>事件序列号防护：提供 seq 时必须严格递增，过旧事件拒绝（对应 ECHI SEQUENCE_NUMBER）</li>
+ *   <li>事件序列号防护：提供 seq 时按 32 位回绕语义校验单调递增（对应 ECHI SEQUENCE_NUMBER
+ *       4 字节序号计满回绕归零），状态 hash 维护 lastEventSeq 与 seqWrapCount（回绕累计）</li>
  *   <li>时钟偏差防护：事件时间超前服务器时间超过阈值则拒绝，允许修正后重推</li>
  *   <li>乱序不倒退状态机：事件时间早于当前状态进入时间时，仅记录观测字段，
  *       不闭合窗口、不转移状态、不重置进入时间（对应 CMS 迟到事件只记录不改变状态机）</li>
@@ -41,7 +42,7 @@ package com.cms.bill.redis;
  *   <li>callId（空串表示无）</li>
  *   <li>serverNowMs</li>
  *   <li>hasSeq（0/1，是否携带事件序列号）</li>
- *   <li>seq（事件序列号，hasSeq=0 时忽略）</li>
+ *   <li>seq（事件序列号，hasSeq=0 时忽略；内部按 mod 2^32 归一化为 32 位）</li>
  *   <li>stateTtlSeconds（状态 hash 保留时长，每次事件续期）</li>
  *   <li>maxFutureSkewMs（允许的事件时间超前服务器时间的最大毫秒数）</li>
  * </ol>
@@ -72,7 +73,7 @@ public final class AgentStateLua {
             local callId            = ARGV[12]
             local serverNow         = tonumber(ARGV[13])
             local hasSeq            = tonumber(ARGV[14])
-            local seq               = tonumber(ARGV[15])
+            local seq               = tonumber(ARGV[15]) % 4294967296   -- 归一化到 32 位（ECHI 4 字节序号语义）
             local stateTtl          = tonumber(ARGV[16])
             local maxFutureSkewMs   = tonumber(ARGV[17])
 
@@ -98,10 +99,25 @@ public final class AgentStateLua {
               return {4, prevState or '', 0, 0, 0, ''}
             end
 
-            -- 4) 事件序列号防护（参考 Avaya ECHI SEQUENCE_NUMBER）：必须严格递增
+            -- 4) 事件序列号防护（参考 Avaya ECHI SEQUENCE_NUMBER：4 字节序号计满回绕归零）
+            --    回绕感知比较：前向距离 diff = (seq - lastSeq) mod 2^32；
+            --    diff ∈ (0, 2^31] 视为有效前进（含回绕），diff=0（重复）或超过半周期（过旧/序号重置）拒绝。
+            --    约束：同一坐席相邻事件的前向跨度必须小于 2^31（与 ECHI 相同）。
             local lastSeqS = redis.call('HGET', KEYS[1], 'lastEventSeq')
-            if hasSeq == 1 and lastSeqS and seq <= tonumber(lastSeqS) then
-              return {3, prevState or '', 0, 0, 0, ''}
+            if hasSeq == 1 then
+              if lastSeqS then
+                local lastSeq = tonumber(lastSeqS)
+                local diff = (seq - lastSeq) % 4294967296
+                if diff == 0 or diff > 2147483648 then
+                  return {3, prevState or '', 0, 0, 0, ''}
+                end
+                if seq < lastSeq then
+                  -- 原始值回退但回绕距离合法：序号发生回绕，累计回绕次数
+                  redis.call('HINCRBY', KEYS[1], 'seqWrapCount', 1)
+                end
+              else
+                redis.call('HSET', KEYS[1], 'seqWrapCount', 0)
+              end
             end
 
             -- 5) 状态机裁决（参考 Avaya：迟到事件只记录不改变状态机，同状态转移不切分时长）

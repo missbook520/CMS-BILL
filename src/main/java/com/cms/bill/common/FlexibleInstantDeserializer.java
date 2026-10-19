@@ -31,36 +31,52 @@ public class FlexibleInstantDeserializer extends JsonDeserializer<Instant> {
         if (text == null || text.isBlank()) {
             return null;
         }
-        text = text.trim();
+        try {
+            return parseFlexible(text);
+        } catch (IllegalArgumentException e) {
+            throw new IOException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 宽松解析时间字符串（供审计查询参数等复用）。
+     *
+     * @throws IllegalArgumentException 无法识别的格式
+     */
+    public static Instant parseFlexible(String text) {
+        String t = text == null ? null : text.trim();
+        if (t == null || t.isEmpty()) {
+            throw new IllegalArgumentException("时间为空");
+        }
 
         // 纯数字：epoch 秒或毫秒
-        if (text.matches("\\d{10,19}")) {
-            long v = Long.parseLong(text);
-            return text.length() <= 11 ? Instant.ofEpochSecond(v) : Instant.ofEpochMilli(v);
+        if (t.matches("\\d{10,19}")) {
+            long v = Long.parseLong(t);
+            return t.length() <= 11 ? Instant.ofEpochSecond(v) : Instant.ofEpochMilli(v);
         }
         try {
-            return Instant.parse(text);
+            return Instant.parse(t);
         } catch (Exception ignored) {
             // 继续尝试其他格式
         }
         try {
-            return OffsetDateTime.parse(text).toInstant();
+            return OffsetDateTime.parse(t).toInstant();
         } catch (Exception ignored) {
             // 继续尝试其他格式
         }
         try {
-            return LocalDateTime.parse(text, SPACE_DATETIME)
+            return LocalDateTime.parse(t, SPACE_DATETIME)
                     .atZone(ZoneId.systemDefault()).toInstant();
         } catch (Exception ignored) {
             // 继续尝试其他格式
         }
         try {
-            return LocalDateTime.parse(text)
+            return LocalDateTime.parse(t)
                     .atZone(ZoneId.systemDefault()).toInstant();
         } catch (Exception ignored) {
             // 落入最终报错
         }
-        throw new IOException("无法解析时间: \"" + text
+        throw new IllegalArgumentException("无法解析时间: \"" + t
                 + "\"，支持 epoch 毫秒、ISO-8601(含时区) 或 yyyy-MM-dd HH:mm:ss");
     }
 }
